@@ -55,42 +55,30 @@ Only implement what is defined in IRD-004, plus the shared non-functional requir
 
 ```text
 src/main/java/com/proops2026/notificationservice/
-|-- controller/        HTTP layer only - receive request, return response, no business logic
-|   |-- NotificationController.java
-|   `-- HealthController.java
+|-- controller/        HTTP layer only - receive request, return response, no logic
+|   `-- NotificationController.java
 |-- service/           Interfaces + implementations
 |   |-- NotificationService.java
-|   |-- NotificationEventService.java
 |   `-- impl/
-|       |-- NotificationServiceImpl.java
-|       `-- NotificationEventServiceImpl.java
-|-- repository/        JpaRepository interfaces
-|   `-- NotificationRepository.java
-|-- consumer/          Redis queue consumer only
-|   `-- TaskEventConsumer.java
-|-- model/             JPA entities
+|       `-- NotificationServiceImpl.java
+|-- repository/        JpaRepository interfaces + custom queries
+|   |-- NotificationRepository.java
+|   `-- impl/
+|       `-- NotificationRepositoryImpl.java
+|-- model/             JPA entities - maps to database tables
 |   `-- Notification.java
 |-- dto/
-|   |-- event/
-|   |   `-- TaskEventPayload.java
-|   `-- response/
-|       |-- NotificationResponse.java
-|       |-- MarkReadResponse.java
-|       |-- HealthResponse.java
-|       `-- ErrorResponse.java
+|   |-- request/
+|   `-- response/      Output objects - what the client receives
+|       `-- NotificationResponse.java
 |-- mapper/            MapStruct interfaces - entity <-> DTO conversion
 |   `-- NotificationMapper.java
-|-- exception/
-|   |-- NotificationNotFoundException.java
-|   |-- UnauthorizedException.java
-|   |-- InvalidTaskEventException.java
+|-- exception/         Custom exceptions + global handler
 |   `-- GlobalExceptionHandler.java
-|-- config/
-|   |-- RedisConfig.java
-|   `-- WebConfig.java
-|-- interceptor/
-|   `-- LoggingInterceptor.java
 `-- NotificationServiceApplication.java
+
+src/main/resources/
+`-- db/migrations/     Flyway SQL migrations
 ```
 
 ---
@@ -119,7 +107,7 @@ public class Notification {
 ```
 > Do NOT use `@Data` on entities - it causes JPA issues with `equals/hashCode` and lazy loading.
 
-**Queue payload DTO (`dto/event/`):**
+**Queue payload DTO (`dto/request/`):**
 ```java
 @Getter
 @Setter
@@ -194,14 +182,7 @@ public interface NotificationService {
 }
 ```
 
-**Event service (interface)** - queue processing only
-```java
-public interface NotificationEventService {
-    void processEvent(String payload);
-}
-```
-
-**ServiceImpl** - all business logic, ownership checks, DTO mapping
+**ServiceImpl** - all business logic, ownership checks, queue handling, DTO mapping
 ```java
 @Slf4j
 @Service
@@ -286,24 +267,11 @@ Consumer: BRPOP task-events 0
 | `task.overdue` | `A task assigned to you is overdue` |
 
 ```java
-@Component
-@RequiredArgsConstructor
-public class TaskEventConsumer implements CommandLineRunner {
+String payload = redisTemplate.opsForList()
+    .rightPop("task-events", Duration.ofSeconds(30));
 
-    private final StringRedisTemplate redisTemplate;
-    private final NotificationEventService notificationEventService;
-
-    @Override
-    public void run(String... args) {
-        while (!Thread.currentThread().isInterrupted()) {
-            String payload = redisTemplate.opsForList()
-                .rightPop("task-events", Duration.ofSeconds(30));
-
-            if (payload != null) {
-                notificationEventService.processEvent(payload);
-            }
-        }
-    }
+if (payload != null) {
+    processEvent(payload);
 }
 ```
 
@@ -408,7 +376,7 @@ public class GlobalExceptionHandler {
 - If a block appears more than once - extract to a private helper
 - If a method exceeds 20 lines - split it
 - Name helpers after what they do: `findOwnedNotificationOrThrow`, `buildMessage`, `parsePayload`, `validateEventType`
-- Helpers stay `private` inside service/consumer implementations
+- Helpers stay `private` inside service implementations
 
 ---
 
@@ -431,7 +399,7 @@ public class GlobalExceptionHandler {
 
 ```java
 @Slf4j
-public class NotificationEventServiceImpl implements NotificationEventService {
+public class NotificationServiceImpl implements NotificationService {
     log.info("Notification saved for user {} from event {}", userId, eventType);
     log.warn("Skipping unsupported event type: {}", eventType);
     log.error("Failed to parse task event payload: {}", ex.getMessage());
@@ -491,7 +459,7 @@ public class NotificationEventServiceImpl implements NotificationEventService {
 - Use `@SpringBootTest` with real test infrastructure for MySQL and Redis
 - One test class per public surface:
   - `NotificationControllerTest`
-  - `TaskEventConsumerIntegrationTest`
+  - `NotificationServiceTest`
   - `HealthControllerTest`
 - Test method naming: `methodName_condition_expectedResult`
 
