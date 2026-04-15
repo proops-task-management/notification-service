@@ -1,0 +1,1 @@
+Placeholder for custom repository implementations when complex queries are needed.
