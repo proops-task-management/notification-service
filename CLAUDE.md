@@ -11,13 +11,15 @@
 This repo contains notification-service only.
 Only implement what is defined in IRD-004, plus the shared non-functional requirements in IRD-003. Nothing more.
 
+Update (2026-04-16): Redis/queue-based event consumption was removed. notification-service is now DB-only and exposes only read + mark-read APIs.
+
 ---
 
 ## Service Contract
 - `notification-service` is an internal service behind `api-gateway`
 - `api-gateway` is responsible for JWT validation and injects `X-User-Id` and `X-User-Role`
 - In this repo, protected endpoints authorize by comparing stored `user_id` with `X-User-Id`
-- This service consumes Redis List events from `task-events` only
+- This service does not consume queues/events (Redis removed)
 - This service stores notifications only; it does not own task data or user data
 
 ---
@@ -31,13 +33,11 @@ Only implement what is defined in IRD-004, plus the shared non-functional requir
 - Store task snapshots or user snapshots locally - only store UUIDs, `eventType`, derived `message`, and read state
 - Hardcode secrets - all config via env vars
 - Use `ddl-auto=create` or `ddl-auto=update` - Flyway manages schema
-- Replace Redis List + blocking pop with Pub/Sub, polling loops, Kafka, RabbitMQ, or retry workers
 - Add email, webhook, WebSocket, push notification, digest, retry, DLQ, or preference logic
 - Add pagination, unread-only filters, delete endpoints, or bulk mark-read endpoints unless IRD-004 changes
 - Call repository directly from controller - always go through service
 - Return `@Entity` from controller - always map to DTO via MapStruct
 - Use try/catch in controller or request-facing service methods - throw exceptions and let `GlobalExceptionHandler` handle them
-- Let a bad queue payload crash the consumer loop - malformed events must be logged and skipped
 - Write methods longer than 20 lines - split into private helpers
 - Use `@Data` on JPA entities - use `@Getter` + `@Setter` + `@Builder` separately
 - Use `@Autowired` for dependency injection - always use `@RequiredArgsConstructor` + `private final`
@@ -55,21 +55,22 @@ Only implement what is defined in IRD-004, plus the shared non-functional requir
 
 ```text
 src/main/java/com/proops2026/notificationservice/
+|-- config/            Auth header filter + request logging
 |-- controller/        HTTP layer only - receive request, return response, no logic
+|   |-- HealthController.java
 |   `-- NotificationController.java
 |-- service/           Interfaces + implementations
 |   |-- NotificationService.java
 |   `-- impl/
 |       `-- NotificationServiceImpl.java
 |-- repository/        JpaRepository interfaces + custom queries
-|   |-- NotificationRepository.java
-|   `-- impl/
-|       `-- NotificationRepositoryImpl.java
+|   `-- NotificationRepository.java
 |-- model/             JPA entities - maps to database tables
 |   `-- Notification.java
 |-- dto/
-|   |-- request/
 |   `-- response/      Output objects - what the client receives
+|       |-- HealthResponse.java
+|       |-- MarkReadResponse.java
 |       `-- NotificationResponse.java
 |-- mapper/            MapStruct interfaces - entity <-> DTO conversion
 |   `-- NotificationMapper.java
@@ -107,17 +108,7 @@ public class Notification {
 ```
 > Do NOT use `@Data` on entities - it causes JPA issues with `equals/hashCode` and lazy loading.
 
-**Queue payload DTO (`dto/request/`):**
-```java
-@Getter
-@Setter
-public class TaskEventPayload {
-    private String eventType;
-    private String taskId;
-    private String userId;
-    private Instant timestamp;
-}
-```
+**Queue payload DTO (`dto/request/`):** (removed — no queue consumer)
 
 **Response DTO (`dto/response/`):**
 ```java
@@ -148,7 +139,7 @@ public class NotificationServiceImpl implements NotificationService {
 
 ### Layer Rules
 
-**Controller** - HTTP only, no business logic, no Redis handling
+**Controller** - HTTP only, no business logic
 ```java
 @RestController
 @RequestMapping("/notifications")
@@ -182,7 +173,7 @@ public interface NotificationService {
 }
 ```
 
-**ServiceImpl** - all business logic, ownership checks, queue handling, DTO mapping
+**ServiceImpl** - all business logic, ownership checks, DTO mapping
 ```java
 @Slf4j
 @Service
@@ -219,7 +210,6 @@ public class NotificationServiceImpl implements NotificationService {
 
 | Action | Who |
 |---|---|
-| Consume task event | Internal Redis consumer only |
 | List notifications | Authenticated caller - own notifications only |
 | Mark notification as read | Notification owner only |
 | Health check | Public |
@@ -239,52 +229,9 @@ private Notification findOwnedNotificationOrThrow(String notificationId, String 
 
 ---
 
-### Redis Queue Consumer
+### Queue / Events
 
-**Queue contract**
-```text
-Producer: LPUSH task-events <JSON payload>
-Consumer: BRPOP task-events 0
-```
-
-**Event schema**
-```json
-{
-  "eventType": "task.assigned",
-  "taskId": "uuid",
-  "userId": "uuid",
-  "timestamp": "2026-04-14T08:00:00Z"
-}
-```
-
-**Supported events**
-
-| Event | Message |
-|---|---|
-| `task.created` | `A new task has been created` |
-| `task.assigned` | `You have been assigned a new task` |
-| `task.status_changed` | `A task status has been updated` |
-| `task.overdue` | `A task assigned to you is overdue` |
-
-```java
-String payload = redisTemplate.opsForList()
-    .rightPop("task-events", Duration.ofSeconds(30));
-
-if (payload != null) {
-    processEvent(payload);
-}
-```
-
-**Processing rules**
-```text
-1. Block on Redis list `task-events`
-2. Parse `eventType`, `taskId`, `userId`, `timestamp`
-3. Validate event type is supported
-4. Build message from event type
-5. Insert notification row with `isRead=false`
-6. Log success at info level
-7. If payload is malformed or unsupported, log warning/error and continue consuming
-```
+Removed — notification-service no longer consumes events/queues.
 
 ---
 
@@ -365,9 +312,7 @@ public class GlobalExceptionHandler {
 
 - There are no request body DTOs in IRD-004's public API
 - Validate `X-User-Id` is present on protected routes
-- Validate queue payload contains non-empty `eventType`, `taskId`, `userId`, and a parseable timestamp
-- Unsupported event types must not create rows
-- Malformed queue payloads are logged and skipped; they do not break the consumer loop
+- Validate `X-User-Role` is present on protected routes (gateway-injected)
 
 ---
 
@@ -375,7 +320,7 @@ public class GlobalExceptionHandler {
 
 - If a block appears more than once - extract to a private helper
 - If a method exceeds 20 lines - split it
-- Name helpers after what they do: `findOwnedNotificationOrThrow`, `buildMessage`, `parsePayload`, `validateEventType`
+- Name helpers after what they do: `findNotificationOrThrow`, `requireOwner`
 - Helpers stay `private` inside service implementations
 
 ---
@@ -387,8 +332,8 @@ public class GlobalExceptionHandler {
 | Class | PascalCase | `NotificationServiceImpl` |
 | Method | camelCase, verb-first | `markAsRead`, `buildMessage` |
 | Variable | camelCase | `savedNotification`, `eventPayload` |
-| Constant | UPPER_SNAKE_CASE | `TASK_EVENTS_QUEUE` |
-| DTO request/event | Noun + Payload/Request | `TaskEventPayload` |
+| Constant | UPPER_SNAKE_CASE | `USER_ID_HEADER` |
+| DTO request/event | Noun + Payload/Request | — |
 | DTO response | Action/Entity + Response | `NotificationResponse`, `MarkReadResponse` |
 | Exception | Noun + Exception | `NotificationNotFoundException` |
 | Mapper | Entity + Mapper | `NotificationMapper` |
@@ -400,15 +345,12 @@ public class GlobalExceptionHandler {
 ```java
 @Slf4j
 public class NotificationServiceImpl implements NotificationService {
-    log.info("Notification saved for user {} from event {}", userId, eventType);
-    log.warn("Skipping unsupported event type: {}", eventType);
-    log.error("Failed to parse task event payload: {}", ex.getMessage());
+    log.info("Notification marked as read: {}", notificationId);
 }
 ```
 
 - Every inbound HTTP request logged via `LoggingInterceptor`: `[timestamp] METHOD /path -> STATUS (Xms)`
-- Log notification lifecycle events at `info`
-- Log malformed payloads at `warn` or `error`, but keep the consumer alive
+- Log user-facing operations at `info` when helpful
 - Never log JWTs, secrets, or full raw payloads at info level
 - Never use `System.out.println`
 
@@ -455,18 +397,14 @@ public class NotificationServiceImpl implements NotificationService {
 
 ### Testing
 
-- Integration tests are required for the queue-to-DB flow and both REST endpoints
-- Use `@SpringBootTest` with real test infrastructure for MySQL and Redis
+- Mock-based tests are sufficient for this simplified scope (no Redis/queue)
+- Use `@WebMvcTest` + MockMvc for controller tests and Mockito for service mocks
 - One test class per public surface:
   - `NotificationControllerTest`
-  - `NotificationServiceTest`
   - `HealthControllerTest`
 - Test method naming: `methodName_condition_expectedResult`
 
 ```java
-@Test
-void consumeTaskAssignedEvent_validPayload_savesNotification() { ... }
-
 @Test
 void listNotifications_returnsOnlyCallerNotifications() { ... }
 
@@ -481,7 +419,6 @@ void markAsRead_asDifferentUser_returns403() { ... }
 ```
 
 **Required assertions from IRD-004**
-- Event pushed to Redis -> notification saved in DB
 - `GET /notifications` returns only caller's notifications
 - `GET /notifications` returns empty list when caller has none
 - `PATCH /notifications/{id}/read` flips `isRead=true`
@@ -525,12 +462,8 @@ PORT=8083
 SPRING_DATASOURCE_URL=jdbc:mysql://db-notification:3306/notifications_db
 SPRING_DATASOURCE_USERNAME=app_user
 SPRING_DATASOURCE_PASSWORD=app_pass
-SPRING_REDIS_HOST=redis
-SPRING_REDIS_PORT=6379
-JWT_SECRET=<same secret as api-gateway>
 ```
 
-- `JWT_SECRET` is a system-level shared secret defined by the platform, but this repo should still trust gateway-injected identity headers instead of re-validating JWTs itself
 - Never hardcode any of the above values
 
 ---
