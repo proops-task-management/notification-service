@@ -16,3 +16,11 @@ spring:
     locations: classpath:db/migrations
   jackson:
     property-naming-strategy: SNAKE_CASE
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:redis}
+      port: ${SPRING_REDIS_PORT:6379}
+
+notifications:
+  consumer:
+    fixed-delay-ms: ${NOTIFICATIONS_CONSUMER_FIXED_DELAY_MS:1000}

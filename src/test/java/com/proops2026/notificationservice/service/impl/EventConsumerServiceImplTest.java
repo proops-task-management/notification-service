@@ -1,112 +1,93 @@
 package com.proops2026.notificationservice.service.impl;
 
-import com.proops2026.notificationservice.dto.response.NotificationResponse;
-import com.proops2026.notificationservice.exception.NotificationNotFoundException;
-import com.proops2026.notificationservice.exception.UnauthorizedException;
-import com.proops2026.notificationservice.mapper.NotificationMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.proops2026.notificationservice.model.Notification;
 import com.proops2026.notificationservice.repository.NotificationRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.time.LocalDateTime;
-import java.util.List;
-import java.util.Optional;
+import org.springframework.data.redis.core.ListOperations;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-class NotificationServiceImplTest {
+class EventConsumerServiceImplTest {
+
+    @Mock
+    private StringRedisTemplate redisTemplate;
+
+    @Mock
+    private ListOperations<String, String> listOperations;
 
     @Mock
     private NotificationRepository notificationRepository;
 
-    @Mock
-    private NotificationMapper notificationMapper;
+    @Captor
+    private ArgumentCaptor<Notification> notificationCaptor;
 
-    @InjectMocks
-    private NotificationServiceImpl notificationService;
+    private EventConsumerServiceImpl eventConsumerService;
 
-    @Test
-    void listNotifications_returnsMappedResponses() {
-        Notification entity = Notification.builder()
-                .id("n1")
-                .userId("u1")
-                .eventType("task.assigned")
-                .message("m")
-                .isRead(false)
-                .createdAt(LocalDateTime.parse("2026-04-15T10:00:00"))
-                .build();
-
-        when(notificationRepository.findByUserIdOrderByCreatedAtDesc("u1")).thenReturn(List.of(entity));
-        when(notificationMapper.toResponse(entity)).thenReturn(
-                NotificationResponse.builder()
-                        .id("n1")
-                        .eventType("task.assigned")
-                        .message("m")
-                        .isRead(false)
-                        .createdAt(LocalDateTime.parse("2026-04-15T10:00:00"))
-                        .build()
-        );
-
-        List<NotificationResponse> responses = notificationService.listNotifications("u1");
-
-        assertThat(responses).hasSize(1);
-        assertThat(responses.getFirst().getId()).isEqualTo("n1");
-        verify(notificationRepository).findByUserIdOrderByCreatedAtDesc("u1");
-        verify(notificationMapper).toResponse(entity);
+    @BeforeEach
+    void setUp() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        objectMapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+        eventConsumerService = new EventConsumerServiceImpl(redisTemplate, notificationRepository, objectMapper);
     }
 
     @Test
-    void markAsRead_asOwner_setsReadAndSaves() {
-        Notification entity = Notification.builder()
-                .id("n1")
-                .userId("u1")
-                .eventType("task.assigned")
-                .message("m")
-                .isRead(false)
-                .build();
+    void pollTaskEvents_taskAssigned_createsNotification() {
+        when(redisTemplate.opsForList()).thenReturn(listOperations);
+        when(listOperations.rightPop("task-events"))
+                .thenReturn("""
+                        {"eventType":"task.assigned","taskId":"task-1","userId":"user-1","timestamp":"2026-04-17T09:00:00Z"}
+                        """)
+                .thenReturn(null);
 
-        when(notificationRepository.findById("n1")).thenReturn(Optional.of(entity));
+        eventConsumerService.pollTaskEvents();
 
-        var response = notificationService.markAsRead("u1", "n1");
-
-        assertThat(response.getId()).isEqualTo("n1");
-        assertThat(response.isRead()).isTrue();
-        assertThat(entity.isRead()).isTrue();
-        verify(notificationRepository).save(entity);
+        verify(notificationRepository).save(notificationCaptor.capture());
+        Notification saved = notificationCaptor.getValue();
+        assertThat(saved.getUserId()).isEqualTo("user-1");
+        assertThat(saved.getEventType()).isEqualTo("task.assigned");
+        assertThat(saved.getMessage()).isEqualTo("You have been assigned to task task-1.");
+        assertThat(saved.isRead()).isFalse();
     }
 
     @Test
-    void markAsRead_asDifferentUser_returns403() {
-        Notification entity = Notification.builder()
-                .id("n1")
-                .userId("u1")
-                .isRead(false)
-                .build();
+    void pollTaskEvents_taskCommented_createsNotification() {
+        when(redisTemplate.opsForList()).thenReturn(listOperations);
+        when(listOperations.rightPop("task-events"))
+                .thenReturn("""
+                        {"eventType":"task.commented","taskId":"task-2","userId":"user-9","timestamp":"2026-04-17T09:01:00Z"}
+                        """)
+                .thenReturn(null);
 
-        when(notificationRepository.findById("n1")).thenReturn(Optional.of(entity));
+        eventConsumerService.pollTaskEvents();
 
-        assertThatThrownBy(() -> notificationService.markAsRead("u2", "n1"))
-                .isInstanceOf(UnauthorizedException.class)
-                .hasMessage("forbidden");
-
-        verify(notificationRepository, never()).save(entity);
+        verify(notificationRepository).save(notificationCaptor.capture());
+        assertThat(notificationCaptor.getValue().getMessage()).isEqualTo("There is a new comment on task task-2.");
     }
 
     @Test
-    void markAsRead_notFound_returns404() {
-        when(notificationRepository.findById("n1")).thenReturn(Optional.empty());
+    void pollTaskEvents_blankUserId_ignoresEvent() {
+        when(redisTemplate.opsForList()).thenReturn(listOperations);
+        when(listOperations.rightPop("task-events"))
+                .thenReturn("""
+                        {"eventType":"task.assigned","taskId":"task-1","userId":"","timestamp":"2026-04-17T09:00:00Z"}
+                        """)
+                .thenReturn(null);
 
-        assertThatThrownBy(() -> notificationService.markAsRead("u1", "n1"))
-                .isInstanceOf(NotificationNotFoundException.class)
-                .hasMessage("notification not found");
+        eventConsumerService.pollTaskEvents();
+
+        verify(notificationRepository, never()).save(org.mockito.ArgumentMatchers.any(Notification.class));
     }
 }
