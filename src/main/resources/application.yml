@@ -1,0 +1,18 @@
+server:
+  port: ${PORT:8083}
+
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://db-notification:3306/notifications_db}
+    username: ${SPRING_DATASOURCE_USERNAME:app_user}
+    password: ${SPRING_DATASOURCE_PASSWORD:app_pass}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migrations
+  jackson:
+    property-naming-strategy: SNAKE_CASE

@@ -1,0 +1,22 @@
+# Maven
+target/
+*.class
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# VS Code
+.vscode/
+
+# Secrets — never commit
+.env
+
+# Logs
+*.log
+logs/
+
+# Local scratch files
+delete_me.txt

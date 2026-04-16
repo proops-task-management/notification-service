@@ -1,1 +1,0 @@
-This placeholder keeps the src/main/resources directory in Git.

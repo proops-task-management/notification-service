@@ -1,0 +1,42 @@
+services:
+  db-notification:
+    image: mysql:8.0
+    container_name: db-notification
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_ROOT_PASSWORD: ${SPRING_DATASOURCE_PASSWORD}
+    volumes:
+      - db-notification-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - app-net
+
+  notification-service:
+    build: .
+    image: notification-service:0.0.1
+    container_name: notification-service
+    ports:
+      - "${PORT}:${PORT}"
+    environment:
+      PORT: ${PORT}
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL}
+      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME}
+      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD}
+    depends_on:
+      db-notification:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app-net
+
+volumes:
+  db-notification-data:
+
+networks:
+  app-net:
+    driver: bridge
