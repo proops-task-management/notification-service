@@ -15,6 +15,17 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # Builder image only exists at build time (multi-stage, discarded) — its CVEs never
+      # ship in the runtime image. Dependabot can't reason about the temurin suffix on
+      # maven:3.9-eclipse-temurin-21 and re-proposes the JDK 21->26 jump (classified as a
+      # "patch", so update-types filters miss it) which breaks Lombok's @Slf4j at Docker
+      # build time (MIN-8). Freeze the builder image entirely.
+      - dependency-name: "maven"
+      # Runtime: keep Java 21 security patches, but block the JDK-major jump (21 -> 25/26)
+      # with a version range — reliable, independent of Dependabot's major/minor guess.
+      - dependency-name: "eclipse-temurin"
+        versions: [">=22"]
     groups:
       all-minor-patch:
         update-types: ["minor", "patch"]
