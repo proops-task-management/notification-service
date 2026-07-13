@@ -11,7 +11,11 @@
 This repo contains notification-service only.
 Only implement what is defined in IRD-004, plus the shared non-functional requirements in IRD-003. Nothing more.
 
-Update (2026-04-16): Redis/queue-based event consumption was removed. notification-service is now DB-only and exposes only read + mark-read APIs.
+Update (2026-07-13, D8/MIN-12): notification-service **consumes Redis `task-events`** again — a
+dedicated **BRPOP** consumer thread with idempotent processing (`processed_events` ledger) per the
+IRD-004 amendment + ADR-004. (An earlier 2026-04-16 note said "Redis removed / DB-only"; that was
+reverted when the event consumer was re-added — the consumer is now the primary write path
+alongside the read + mark-read APIs.)
 
 ---
 
@@ -19,7 +23,8 @@ Update (2026-04-16): Redis/queue-based event consumption was removed. notificati
 - `notification-service` is an internal service behind `api-gateway`
 - `api-gateway` is responsible for JWT validation and injects `X-User-Id` and `X-User-Role`
 - In this repo, protected endpoints authorize by comparing stored `user_id` with `X-User-Id`
-- This service does not consume queues/events (Redis removed)
+- This service **consumes** the Redis `task-events` list (BRPOP) and derives notifications from it;
+  it also exposes read + mark-read HTTP APIs. It never publishes events.
 - This service stores notifications only; it does not own task data or user data
 
 ---
@@ -108,7 +113,7 @@ public class Notification {
 ```
 > Do NOT use `@Data` on entities - it causes JPA issues with `equals/hashCode` and lazy loading.
 
-**Queue payload DTO (`dto/request/`):** (removed — no queue consumer)
+**Queue payload DTO (`dto/request/`):** `TaskEventPayload` — `{eventId, eventType, taskId, userId, timestamp}` (schema v2; `eventId` may be absent for legacy v1). Deserialized by the consumer only.
 
 **Response DTO (`dto/response/`):**
 ```java
@@ -229,9 +234,25 @@ private Notification findOwnedNotificationOrThrow(String notificationId, String 
 
 ---
 
-### Queue / Events
+### Queue / Events (D8 — IRD-004 amended, ADR-004)
 
-Removed — notification-service no longer consumes events/queues.
+notification-service consumes the Redis `task-events` list produced by task-service (`LPUSH`).
+
+- **`TaskEventConsumer`** (`SmartLifecycle`) runs one dedicated thread doing a blocking
+  **`BRPOP task-events <timeout>`** (`rightPop(key, Duration)`), default 5s
+  (`NOTIFICATIONS_CONSUMER_BRPOP_TIMEOUT_S`). **`BRPOP`, not `BLPOP`** — the producer `LPUSH`es the
+  head, so popping the tail keeps events **FIFO** (`BLPOP` would be LIFO). No `@Scheduled` poll.
+- **`EventConsumerServiceImpl.process(payload)`** (`@Transactional`, separate bean so the proxy
+  applies) parses the event and, if it carries a schema-v2 `eventId`, records it in
+  `processed_events` **first** — a duplicate `eventId` is skipped (idempotent). v1 events (no
+  `eventId`) are processed without dedup. At-most-once delivery per ADR-004 (Redis Streams = upgrade path).
+- **`ConsumerLivenessHealthIndicator`** ties `/actuator/health/liveness` to the loop's `lastPollAt`
+  (DOWN if older than `NOTIFICATIONS_CONSUMER_LIVENESS_THRESHOLD_S`, default 30s).
+- Never re-introduce polling/`rightPop`-on-a-fixed-delay, and never publish events from here.
+
+**Actuator/hardening** (as the other services, D6/D7): `/actuator/health` + `/actuator/prometheus`
+(SLO buckets `100ms,300ms,1s,3s`), `server.shutdown=graceful` (20s), Hikari `maximum-pool-size=10`,
+JVM `-XX:MaxRAMPercentage=75.0` in the **Dockerfile** (`JAVA_TOOL_OPTIONS`), never `application.yml`.
 
 ---
 
@@ -397,11 +418,13 @@ public class NotificationServiceImpl implements NotificationService {
 
 ### Testing
 
-- Mock-based tests are sufficient for this simplified scope (no Redis/queue)
-- Use `@WebMvcTest` + MockMvc for controller tests and Mockito for service mocks
-- One test class per public surface:
-  - `NotificationControllerTest`
-  - `HealthControllerTest`
+- HTTP + service logic: mock-based (`@WebMvcTest`/MockMvc + Mockito). Consumer processing logic
+  (`EventConsumerServiceImpl.process`) is mock-based too (`EventConsumerServiceImplTest`).
+- **Consumer delivery + idempotency: Testcontainers** (real MySQL + Redis) per IRD-004 —
+  `integration/NotificationConsumerIntegrationTest` proves BRPOP delivery + duplicate-`eventId`
+  skip (restart-mid-process safety). Docker must be running locally; CI is the authoritative gate
+  (see TSG-009).
+- One test class per public surface: `NotificationControllerTest`, `HealthControllerTest`.
 - Test method naming: `methodName_condition_expectedResult`
 
 ```java
@@ -446,6 +469,12 @@ CREATE INDEX idx_notifications_created_at
 
 CREATE INDEX idx_notifications_is_read
   ON notifications (user_id, is_read);
+
+-- Idempotency ledger (D8, IRD-004 amended / ADR-004) — keyed on the schema-v2 eventId
+CREATE TABLE processed_events (
+  event_id     CHAR(36)  PRIMARY KEY,
+  processed_at DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
 - Schema managed via Flyway: `db/migrations/V{n}__description.sql`
@@ -462,6 +491,10 @@ PORT=8083
 SPRING_DATASOURCE_URL=jdbc:mysql://db-notification:3306/notifications_db
 SPRING_DATASOURCE_USERNAME=app_user
 SPRING_DATASOURCE_PASSWORD=app_pass
+SPRING_REDIS_HOST=redis
+SPRING_REDIS_PORT=6379
+NOTIFICATIONS_CONSUMER_BRPOP_TIMEOUT_S=5
+NOTIFICATIONS_CONSUMER_LIVENESS_THRESHOLD_S=30
 ```
 
 - Never hardcode any of the above values
