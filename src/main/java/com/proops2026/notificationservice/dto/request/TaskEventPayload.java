@@ -8,6 +8,10 @@ import lombok.Setter;
 @Setter
 public class TaskEventPayload {
 
+    // Schema v2 (IRD-002 amended) — dedup key. May be absent for legacy v1 events (processed without dedup).
+    @JsonAlias({"eventId", "event_id"})
+    private String eventId;
+
     @JsonAlias({"eventType", "event_type"})
     private String eventType;
 
