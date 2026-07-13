@@ -2,6 +2,7 @@ package com.proops2026.notificationservice.integration;
 
 import com.proops2026.notificationservice.repository.NotificationRepository;
 import com.proops2026.notificationservice.repository.ProcessedEventRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -60,6 +61,16 @@ class NotificationConsumerIntegrationTest {
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
         registry.add("notifications.consumer.brpop-timeout-s", () -> "1"); // snappy loop for the test
+    }
+
+    @BeforeEach
+    void resetState() {
+        // The consumer commits on its own thread (outside the test transaction), so rows persist
+        // across test methods against the shared container. Reset explicitly for isolation, and
+        // drain any leftover queue entries so each test starts from a known-empty state.
+        redisTemplate.delete(TASK_EVENTS_QUEUE);
+        notificationRepository.deleteAll();
+        processedEventRepository.deleteAll();
     }
 
     @Test
